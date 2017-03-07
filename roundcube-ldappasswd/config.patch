@@ -1,0 +1,36 @@
+diff --git a/plugins/password/config.inc.php.dist b/plugins/password/config.inc.php.dist
+index d24016d01..6a3ac673b 100644
+--- a/plugins/password/config.inc.php.dist
++++ b/plugins/password/config.inc.php.dist
+@@ -201,7 +201,7 @@ $config['password_ldap_adminPW'] = null;
+ // '%name' will be replaced by the current roundcube user's name part
+ // '%domain' will be replaced by the current roundcube user's domain part
+ // '%dc' will be replaced by domain name hierarchal string e.g. "dc=test,dc=domain,dc=com"
+-// Exemple: 'uid=%login,ou=people,dc=exemple,dc=com'
++// Example: 'uid=%login,ou=people,dc=exemple,dc=com'
+ $config['password_ldap_userDN_mask'] = 'uid=%login,ou=people,dc=exemple,dc=com';
+ 
+ // LDAP search DN
+@@ -307,6 +307,22 @@ $config['password_ldap_ppolicy_cafile'] = '/etc/ssl/cacert.crt';
+ 
+ 
+ 
++// ldappasswd(1) Driver options
++// --------------------------
++// TEMPLATE for executing the ldappasswd(1) utility
++// New password is passed on stdin, so you will likely want -T /dev/stdin
++// If %currpasspipe appears in the string, the current password is piped
++//   in via fd 3 and the macro itself is replaced with /dev/fd/3
++// Macros from password_ldap_userDN_mask are also supported (e.g. %login, %dc)
++// *************************************************************************
++// *** COMPATIBILITY NOTICE - IF YOU INTEND TO PIPE THE CURRENT PASSWORD ***
++// ***              This driver REQUIRES /dev/fd/N for N>2               ***
++// ***         On BSD variants you may need to mount fdescfs(4)          ***
++// *************************************************************************
++// WARNING: php likely invokes /bin/sh so be careful with shell metacharacters
++$config['password_ldappasswd_cmd'] = '/usr/local/bin/ldappasswd -T /dev/stdin -y %currpasspipe -D %dc %dc';
++
++
+ // DirectAdmin Driver options
+ // --------------------------
+ // The host which changes the password
