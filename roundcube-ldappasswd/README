@@ -1,0 +1,28 @@
+Roundcube password module utilizing ldappasswd(1)
+
+ * Password change driver using the OpenLDAP ldappasswd(1) utility
+ *
+ * Advantages of this method:
+ *  - No extra configuration if OpenLDAP/ldappasswd are already configured
+ *  - Indifferent to password storage (attribute) and hashing details
+ *  - Future-proof: supports everything ldappasswd(1) can do now, and later
+ *  - TLS/SSF verification is done by OpenLDAP according to system settings
+ *  - Uses PASSMOD extended operation; no need to retrieve full user record
+ *
+ * Disadvantages:
+ *  - ldappasswd(1) must be installed and configured on the local system
+ *
+ **************************************************************************
+ ***                        COMPATIBILITY NOTICE                        ***
+ ***          This implementation REQUIRES /dev/fd/N for N>2            ***
+ ***         On BSD variants you may need to mount fdescfs(4)           ***
+ **************************************************************************
+ *
+ * Unlike, e.g., GnuPG, ldappasswd(1) does not support passing a numeric fd
+ * from which to read a password. Since writing the password to a temporary
+ * file or passing on the command line is unacceptable, /dev/fd is the only
+ * secure method if we want a non-interactive option
+
+Offered to upstream but rejected due to BSD license
+
+Ref: http://lists.roundcube.net/pipermail/dev/2014-September/023462.html
