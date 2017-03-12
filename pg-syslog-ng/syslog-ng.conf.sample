@@ -1,0 +1,33 @@
+@version:3.7
+@include "scl.conf"
+
+#
+# This sample configuration file is essentially equilivent to the stock
+# FreeBSD /etc/syslog.conf file.
+#
+# $FreeBSD: head/sysutils/syslog-ng/files/syslog-ng.conf.sample 340872 2014-01-24 00:14:07Z mat $
+#
+
+#
+# options
+#
+options { use_fqdn(yes); use_dns(no); dns_cache(no); chain_hostnames(yes); flush_lines(0); threaded(yes); };
+
+#
+# sources
+#
+source s_local { internal(); };
+
+source s_network { udp(); };
+
+destination d_pgs {
+	pipe("/var/run/syslog-pg/pgs.pipe"
+		template("INSERT INTO logs (host, facility, priority, level, tag, date, time, program, msg) VALUES (E'$HOST', E'$FACILITY', E'$PRIORITY', E'$LEVEL', E'$TAG', E'$YEAR-$MONTH-$DAY', E'$HOUR:$MIN:$SEC', E'$PROGRAM', E'$MSG');\n")
+		template-escape(yes));
+};
+
+log {
+	source(s_local);
+	source(s_network);
+	destination(d_pgs);
+};

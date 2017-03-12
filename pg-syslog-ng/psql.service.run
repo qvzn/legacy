@@ -1,0 +1,8 @@
+#! /bin/sh
+set -e
+umask 77
+
+P=/var/run/syslog-pg/pgs.pipe
+
+test -e $P || mkfifo $P
+exec setuidgid sql psql -q -U loghostserver -h postgres.server.xxx.local mysyslog < $P
