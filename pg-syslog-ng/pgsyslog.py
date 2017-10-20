@@ -157,7 +157,8 @@ class poller(object):
         self.slf.logprinter.print_stats()
 
     def start(self):
-        signal.signal(signal.SIGINFO, self.siginfohandler)
+        if hasattr(signal, 'SIGINFO'):
+            signal.signal(signal.SIGINFO, self.siginfohandler)
         curs = self.slf.getcursor()
         iwait = conswaiter()
         try:
