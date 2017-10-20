@@ -110,10 +110,15 @@ class logprinter(object):
     def prec(self, rec):
         slstamp = datetime.datetime.combine(rec['date'], rec['time'])
         print stampformat(slstamp),
+        if self.options.no_hostname:
+            fmt = ''
+        else:
+            fmt = '%(host)s '
         if self.options.print_full:
             dbstamp = rec['stamp']
             td = dbstamp - slstamp
-            print '%(host)s %(facility)s.%(priority)s prog=%(program)s tag=%(tag)s' % rec,
+            fmt += '%(facility)s.%(priority)s prog=%(program)s tag=%(tag)s'
+            print fmt % rec,
             print 'delay=%d' % td.total_seconds()
             print '\t%(msg)s' % rec
             print '-' * 40
@@ -125,9 +130,10 @@ class logprinter(object):
                 pr['program'] = ''
                 pr['_print_program'] = ''
             if self.options.print_priority:
-                print '%(host)s [%(facility)s.%(priority)s] %(program)s%(_print_program)s%(msg)s' % pr
+                fmt += '[%(facility)s.%(priority)s] %(program)s%(_print_program)s%(msg)s'
             else:
-                print '%(host)s %(program)s%(_print_program)s%(msg)s' % pr
+                fmt += '%(program)s%(_print_program)s%(msg)s'
+            print fmt % pr
 
     def precs(self, recs):
         for rec in recs:
@@ -474,6 +480,8 @@ def optparseconfig():
     parser.add_option_group(advfilter)
 
     printgroup = optparse.OptionGroup(parser, 'Log message output options')
+    printgroup.add_option('', '--no-hostname', action='store_true',
+        help='Do not include hostname in record output')
     printgroup.add_option('', '--print-priority', action='store_true')
     printgroup.add_option('', '--print-full', action='store_true')
     parser.add_option_group(printgroup)
