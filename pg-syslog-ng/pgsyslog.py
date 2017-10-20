@@ -140,7 +140,7 @@ class logprinter(object):
             self.pplog(rec)
 
     def print_summary(self):
-        if self.count > 0:
+        if self.count > 0 and (self.options.print_stats or sys.stdout.isatty()):
             print >> sys.stderr, '(%d records printed)' % self.count
             self.print_stats()
 
@@ -484,6 +484,8 @@ def optparseconfig():
         help='Do not include hostname in record output')
     printgroup.add_option('', '--print-priority', action='store_true')
     printgroup.add_option('', '--print-full', action='store_true')
+    printgroup.add_option('', '--print-stats', action='store_true',
+        help='Force output of statistics (default: only if stdout is a tty)')
     parser.add_option_group(printgroup)
 
     pollergroup = optparse.OptionGroup(parser, 'Polling mode options')
