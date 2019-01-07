@@ -1,7 +1,6 @@
 #! /usr/bin/env python
 #
-# Copyright (c) 2014 Dima Dorfman.
-# Copyright (c) 2017-2019 Dima Dorfman.
+# Copyright (c) 2014, 2017, 2019 Dima Dorfman.
 # All rights reserved.
 #
 # Permission to use, copy, modify, and/or distribute this software for any
@@ -17,7 +16,7 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-__version__ = '$Id: pgsyslog.py 276 2019-01-07 09:41:51Z dima $'
+__version__ = '$Id: pgsyslog.py 277 2019-01-07 09:51:18Z dima $'
 
 # TODO:
 #  - atrun/save-entropy summarization
