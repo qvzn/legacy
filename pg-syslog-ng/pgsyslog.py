@@ -1,6 +1,8 @@
 #! /usr/bin/env python
 #
-# Copyright (c) 2014 Dima Dorfman. All rights reserved.
+# Copyright (c) 2014 Dima Dorfman.
+# Copyright (c) 2017-2019 Dima Dorfman.
+# All rights reserved.
 #
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -14,17 +16,19 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
-# $qvzn/Id: pgsyslog.py 268 2016-07-30 06:55:29Z dima $
+
+__version__ = '$Id: pgsyslog.py 276 2019-01-07 09:41:51Z dima $'
 
 # TODO:
 #  - atrun/save-entropy summarization
-#  - some sort of n% mail n% sshd etc
+#  - expand IN filters to support LIKE or other wildcards
 
 SYSLOG_COLUMNS = 'seq, stamp, host, msg, facility, priority, tag, program, date, time'
 
 import datetime
 import operator
 import os
+import optparse
 import psycopg2, psycopg2.extras
 import signal
 import sys
@@ -33,7 +37,7 @@ import time
 now = datetime.datetime.utcnow
 
 
-class ApplicationError(Exception):
+class ApplicationError(EnvironmentError):
     pass
 
 
@@ -239,14 +243,35 @@ class syslogfilter(object):
                 value = value[1:]
             else:
                 sign = eqop
-            k = 'sa%d%s' % (self.sqlacounter(), key)
+            k = self.sqlvarname(key)
             self.wcl.append('%s %s %%(%s)s' % (key, sign, k))
             self.sqla[k] = value
+
+    def filteraddwhere_in(self, key, values, negsign='-'):
+        if not values:
+            return
+        pos = [x for x in values if not x.startswith(negsign)]
+        neg = [x[1:] for x in values if x.startswith(negsign)]
+        if self.verbose and pos and neg:
+            self.vprint('contradictory %s spec (pos=%r, neg=%r)' % (
+                key, pos, neg))
+        self.filteraddwhere_in_1(key, pos)
+        self.filteraddwhere_in_1(key, neg, 'NOT IN')
+
+    def filteraddwhere_in_1(self, key, values, inop='IN'):
+        if values:
+            skey = key if key.endswith('s') else key + 's'
+            k = self.sqlvarname('%s_%s' % (skey, inop.replace(' ', '')))
+            self.wcl.append('%s %s %%(%s)s' % (key, inop, k))
+            self.sqla[k] = tuple(values)
 
     def sqlacounter(self):
         # Yes this will return 1 first, who cares
         self.sqlc = self.sqlc + 1
         return self.sqlc
+
+    def sqlvarname(self, key):
+        return 'sa%d_%s' % (self.sqlacounter(), key)
 
     def setfilter(self, options):
         self.sqla = {}
@@ -261,9 +286,9 @@ class syslogfilter(object):
         elif options.interval:
             self.wcl.append('stamp > (now() - %(interval)s::interval)')
             self.sqla['interval'] = options.interval
-        self.filteraddwhere('host', options.filter_host)
-        self.filteraddwhere('facility', options.filter_facility)
-        self.filteraddwhere('program', options.filter_program)
+        self.filteraddwhere_in('host', options.filter_host)
+        self.filteraddwhere_in('facility', options.filter_facility)
+        self.filteraddwhere_in('program', options.filter_program)
         self.filteraddwhere('msg', options.filter_posixre, '~*')
         self.filteraddwhere('msg', options.filter_like, 'LIKE', False)
         self.filteraddwhere('msg', options.filter_similar, 'SIMILAR TO', False)
@@ -287,6 +312,10 @@ class syslogfilter(object):
             sqla = d
         self.vlogsql(statement, sqla)
         c.execute(statement, sqla)
+
+    def vprint(self, s):
+        if self.verbose:
+            print >> sys.stderr, 'VERBOSE: %s' % s
 
     def vlogsql(self, statement, sqla):
         if self.verbose:
@@ -419,16 +448,20 @@ class runmodeswitch(object):
 
 
 def optparseconfig():
-    import optparse
-    parser = optparse.OptionParser('usage: %prog [options]', add_help_option=False)
+    parser = optparse.OptionParser('usage: %prog [options]',
+                                   add_help_option=False,
+                                   version=__version__)
     parser.set_defaults(verbose=False, mode='stats_simple')
-    parser.add_option('', '--help', action='help', help='show this help message and exit')
+    # Done explicitly to avoid taking up the -h option
+    parser.add_option('', '--help', action='help',
+                      help='show this help message and exit')
 
     def storeandmode(realdest, modevalue):
         def optioncb(option, opt_str, value, parser):
             setattr(parser.values, realdest, value)
             setattr(parser.values, 'mode', modevalue)
         return optioncb
+
     modegroup = optparse.OptionGroup(parser, 'Running mode options')
     modegroup.add_option('-n', type='int', action='callback',
                          callback=storeandmode('tailcount', 'tail'),
@@ -463,8 +496,12 @@ def optparseconfig():
     simplefil = optparse.OptionGroup(parser, 'Simple column filtering options',
                                      'If the first character of the option value is a '
                                      'dash (-) the match sense will be reversed (i.e. NOT)')
-    simplefil.add_option('-h', '--host', dest='filter_host', type='string', action='append')
-    simplefil.add_option('-f', '--facility', dest='filter_facility', type='string', action='append')
+    simplefil.add_option('-h', '--host', dest='filter_host',
+                         type='string', action='append',
+                         help='Match syslog source host')
+    simplefil.add_option('-f', '--facility', dest='filter_facility',
+                         type='string', action='append',
+                         help='Match syslog facility')
     simplefil.add_option('-p', '--program', dest='filter_program', action='append',
                          help='Match program name')
     parser.add_option_group(simplefil)
@@ -506,12 +543,14 @@ def main():
         parser.error('at least one running mode option is required')
     try:
         sf = syslogfilter(options)
+        try:
+            runmodeswitch(sf).start(options)
+        finally:
+            sf.shutdown()
     except EnvironmentError, e:
         parser.error('%s' % e)
-    try:
-        runmodeswitch(sf).start(options)
-    finally:
-        sf.shutdown()
+    except KeyboardInterrupt:
+        pass
 
 def conswaiter(waitstr='\-/|', refresh=.1):
     ix = [0]
