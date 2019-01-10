@@ -1,24 +1,26 @@
-##
-## Copyright (c) 2014 Dima Dorfman.
-## All rights reserved.
-##
-## Permission to use, copy, modify, and/or distribute this software for any
-## purpose with or without fee is hereby granted, provided that the above
-## copyright notice and this permission notice appear in all copies.
-##
-## THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-## WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-## MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-## ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-## WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-## ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-## OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-##
-## $qvzn/Id: cymru.py 838 2014-10-23 02:31:06Z dima $
-##
-## cymru.py - Python interface to [*.]asn.cymru.com DNS zones
-##
+#
+# Copyright (c) 2014, 2019 Dima Dorfman.
+# All rights reserved.
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# qcymru.py - Python interface to [*.]asn.cymru.com DNS zones
+#
+# nfxnsvn: Id: cymru.py 838 2014-10-23 02:31:06Z dima
+# tritsvn: Id: cymru.py 6112 2018-03-17 08:13:12Z dima
+#
 
+__revision__ = '$Id: qcymru.py 171 2019-01-07 14:03:16Z dima $'
 __all__ = ['CymruError', 'CymruView', 'ip2asn', 'nibble6']
 
 import socket
@@ -84,6 +86,25 @@ class CymruView(object):
         self.loadasndata()
         return self.asnparsed['descr']
 
+    @property
+    def asnobject(self):
+        self.loadasndata()
+        s = self.asnparsed.get('object', '')
+        if not s:
+            d = self.asndescr.split()
+            if d and d[0].isupper():
+                s = d[0].strip(' .,-')
+        return s
+
+    def asnrepr(self, separator='/'):
+        def gen():
+            yield 'AS%s' % self.asn
+            if self.asnobject:
+                yield self.asnobject
+            else:
+                yield self.cc
+        return '%s' % separator.join(gen())
+
     @staticmethod
     def from_inet(querydomain, ipaddr):
         s = ipaddr.split('.')
@@ -95,10 +116,20 @@ class CymruView(object):
     def from_inet6(querydomain, ipaddr):
         return CymruView(querydomain, ipaddr, nibble6(ipaddr) + '.origin6')
 
-def nibble6(ipaddr):
-    assert ':' in ipaddr and '.' not in ipaddr
-    nx = socket.inet_pton(socket.AF_INET6, ipaddr)
-    return '.'.join('%x.%x' % divmod(ord(x), 16) for x in nx)[::-1]
+    def __repr__(self):
+        def gen():
+            yield self.prefix
+            yield 'AS%s' % self.asn
+            for x in 'asnobject', 'asndescr':
+                val = getattr(self, x)
+                if val:
+                    yield val
+        s = ' - '.join(gen())
+        return '%s [%s]' % (s, self.rir.upper())
+
+    def __str__(self):
+        return 'AS%s (%s)' % (self.asn, self.cc)
+
 
 def ip2asn(ipaddr, querydomain='asn.cymru.com'):
     if not ipaddr or (':' in ipaddr and '.' in ipaddr):
@@ -109,3 +140,8 @@ def ip2asn(ipaddr, querydomain='asn.cymru.com'):
         return CymruView.from_inet(querydomain, ipaddr)
     else:
         raise CymruError, 'not supposed to happen'
+
+def nibble6(ipaddr):
+    assert ':' in ipaddr and '.' not in ipaddr
+    nx = socket.inet_pton(socket.AF_INET6, ipaddr)
+    return '.'.join('%x.%x' % divmod(ord(x), 16) for x in nx)[::-1]
