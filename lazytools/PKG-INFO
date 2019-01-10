@@ -1,0 +1,10 @@
+Metadata-Version: 1.0
+Name: lazytools
+Version: 0.6
+Summary: Fast tools to support deferred (lazy) evaluation
+Home-page: http://www.trit.org/~dima/
+Author: Dima Dorfman
+Author-email: dima+pyext@trit.org
+License: BSD
+Description: UNKNOWN
+Platform: UNKNOWN
