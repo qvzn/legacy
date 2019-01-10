@@ -1,0 +1,2 @@
+# $Id: MANIFEST.in 124 2017-03-12 03:42:47Z dima $
+include src/*.h
