@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python2
 #
 # Copyright (c) 2014, 2017, 2019 Dima Dorfman.
 # All rights reserved.
@@ -16,13 +16,19 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-__version__ = '$Id: pgsyslog.py 277 2019-01-07 09:51:18Z dima $'
+__version__ = '$Id: pgsyslog.py 304 2019-07-12 22:02:06Z dima $'
 
 # TODO:
 #  - atrun/save-entropy summarization
 #  - expand IN filters to support LIKE or other wildcards
 
-SYSLOG_COLUMNS = 'seq, stamp, host, msg, facility, priority, tag, program, date, time'
+DEFAULT_DATE_FORMAT = '%b %d %H:%M:%S'
+DEFAULT_INTERVAL = '24 hours'
+DEFAULT_TAILCOUNT = 1000
+
+SYSLOG_BASE_COLS = ['stamp', 'date', 'time', 'host', 'msg']
+SYSLOG_ALL_COLS = SYSLOG_BASE_COLS + \
+                  ['seq', 'facility', 'priority', 'tag', 'program']
 
 import datetime
 import operator
@@ -35,12 +41,24 @@ import time
 
 now = datetime.datetime.utcnow
 
+# Dynamic
+LOCAL_TIMEZONE = None
 
 class ApplicationError(EnvironmentError):
     pass
 
+def app_error(s):
+    raise ApplicationError, s
+
 
 class statcounter(object):
+
+    tab_cols_map = (
+        ('htab', ('host',)),
+        ('ftab', ('facility',)),
+        ('ltab', ('priority',)),
+        ('ptab', ('program', 'programs', '\n\t')),
+    )
 
     def __init__(self):
         self.reset()
@@ -57,10 +75,10 @@ class statcounter(object):
         self.nrec += 1
         if self.first is None:
             self.first = rec
-        self.count(self.htab, rec['host'])
-        self.count(self.ftab, rec['facility'])
-        self.count(self.ltab, rec['priority'])
-        self.count(self.ptab, rec['program'])
+        for tabname, cnx in self.tab_cols_map:
+            colname = cnx[0]
+            if colname in rec:
+                self.count(getattr(self, tabname), rec[colname])
 
     def count(self, tab, k):
         try:
@@ -78,10 +96,10 @@ class statcounter(object):
         def ntopn(what, tab, sep='\t'):
             rs.append('Top 5 %s:%s' % (what, sep) +
                       ' '.join('%s(%.2f%%)' % x for x in self.topnstat(tab)))
-        ntopn('facility', self.ftab)
-        ntopn('priority', self.ltab)
-        ntopn('programs', self.ptab, '\n\t')
-
+        for tabname, cnx in self.tab_cols_map[1:]:
+            tab = getattr(self, tabname)
+            if tab:
+                ntopn(cnx[1] if len(cnx) > 1 else cnx[0], tab, *cnx[2:])
         return '\n'.join(rs)
 
     def topnstat(self, tab, n=5):
@@ -98,21 +116,31 @@ class logprinter(object):
     def __init__(self, options):
         self.options = options
         self.stats = statcounter()
-        self.maxseq = 0
+        self.stats_on = not not options.print_stats
+        self.track_seq = options.mode == 'poller'
+        if self.track_seq:
+            self.maxseq = 0
         self.count = 0
 
+    def stampformat(self, datestamp, format=None):
+        if format is None:
+            format = self.options.date_format
+        return stampformat(datestamp, format)
+
     def pplog(self, rec):
-        seq = rec['seq']
-        if seq <= self.maxseq:
-            print 'WARNING! syslog pgdb sequence going wrong way! %d . %d' % (self.maxseq, seq)
-        self.maxseq = seq
+        if self.track_seq:
+            seq = rec['seq']
+            if seq <= self.maxseq:
+                print >> sys.stderr, 'WARNING! syslog pgdb sequence going wrong way! %d . %d' % (self.maxseq, seq)
+            self.maxseq = seq
         self.count += 1
         self.prec(rec)
-        self.stats.enter(rec)
+        if self.stats_on:
+            self.stats.enter(rec)
 
     def prec(self, rec):
         slstamp = datetime.datetime.combine(rec['date'], rec['time'])
-        print stampformat(slstamp),
+        print self.stampformat(slstamp),
         if self.options.no_hostname:
             fmt = ''
         else:
@@ -127,6 +155,7 @@ class logprinter(object):
             print '-' * 40
         else:
             pr = dict(rec)
+            pr['host'] = unquote_implied_domains(self.options, pr['host'])
             if pr['program']:
                 pr['_print_program'] = ': '
             else:
@@ -143,11 +172,15 @@ class logprinter(object):
             self.pplog(rec)
 
     def print_summary(self):
-        if self.count > 0 and (self.options.print_stats or sys.stdout.isatty()):
+        #if self.count > 0 and (self.options.print_stats or sys.stdout.isatty()):
+        if self.count > 0 and self.options.print_stats:
+            assert self.stats_on
             print >> sys.stderr, '(%d records printed)' % self.count
             self.print_stats()
 
     def print_stats(self):
+        if not self.stats_on:
+            return
         linesep(sys.stderr)
         print >> sys.stderr, self.stats.report()
         linesep(sys.stderr)
@@ -160,6 +193,7 @@ class poller(object):
         self.interval = options.poller_interval
         self.elapsenote = options.poller_elapsenote
         self.initial_page = options.poller_initial_page
+        self.output_progress = options.progress
         self.siginfoflag = False
 
     def siginfohandler(self, signum, frame):
@@ -169,7 +203,7 @@ class poller(object):
         if hasattr(signal, 'SIGINFO'):
             signal.signal(signal.SIGINFO, self.siginfohandler)
         curs = self.slf.getcursor()
-        iwait = conswaiter()
+        iwait = conswaiter(noprint=not self.output_progress)
         try:
             self.slf.select(curs, ['ORDER BY stamp DESC', 'LIMIT %d' % self.initial_page],
                             outer='SELECT * FROM (%s) AS x ORDER BY x.stamp')
@@ -189,12 +223,13 @@ class poller(object):
                 lastpoll = now()
                 data = curs.fetchall()
                 if data:
-                    if clrn is not None:
-                        print '\r%s' % (' ' * clrn),
-                    print '\r',
-                    delta = nw - lastdata
-                    if self.elapsenote > 0 and delta.seconds >= self.elapsenote:
-                        print '%s %s elapsed...' % ('=' * 70, delta)
+                    if self.output_progress:
+                        if clrn is not None:
+                            print '\r%s' % (' ' * clrn),
+                        print '\r',
+                        delta = nw - lastdata
+                        if self.elapsenote > 0 and delta.seconds >= self.elapsenote:
+                            print '%s %s elapsed...' % ('=' * 70, delta)
                     mseq = max(x[0] for x in data)
                     lastdata = nw
                     self.slf.logprinter.precs(data)
@@ -210,6 +245,7 @@ class syslogfilter(object):
         self.connect(options)
         self.setfilter(options)
         self.logprinter = logprinter(options)
+        self.needed_cols = list(self.gen_needed_cols(options))
 
     def shutdown(self):
         if self.pgdb is not None:
@@ -276,16 +312,21 @@ class syslogfilter(object):
         self.sqla = {}
         self.sqlc = 0
         self.wcl = []
-        if options.begindate or options.enddate:
-            if not options.begindate or not options.enddate:
-                raise ValueError, '--begin and --end must be specified together'
+        if options.begindate and options.enddate:
             self.wcl.append('stamp BETWEEN %(begindate)s::date AND %(enddate)s::date')
             self.sqla['begindate'] = options.begindate
+            self.sqla['enddate'] = options.enddate
+        elif options.begindate:
+            self.wcl.append('stamp > %(begindate)s::date')
+            self.sqla['begindate'] = options.begindate
+        elif options.enddate:
+            self.wcl.append('stamp < %(enddate)s::date')
             self.sqla['enddate'] = options.enddate
         elif options.interval:
             self.wcl.append('stamp > (now() - %(interval)s::interval)')
             self.sqla['interval'] = options.interval
-        self.filteraddwhere_in('host', options.filter_host)
+        self.filteraddwhere_in('host',
+            (quote_implied_domains(options, x) for x in options.filter_host))
         self.filteraddwhere_in('facility', options.filter_facility)
         self.filteraddwhere_in('program', options.filter_program)
         self.filteraddwhere('msg', options.filter_posixre, '~*')
@@ -293,7 +334,7 @@ class syslogfilter(object):
         self.filteraddwhere('msg', options.filter_similar, 'SIMILAR TO', False)
 
     def mkstmt(self, cols, where='', clauses=()):
-        ss = ['SELECT %s FROM %s' % (cols, self.logstable)]
+        ss = ['SELECT %s FROM %s' % (colslist(cols), self.logstable)]
         wcl = list(self.wcl)
         if where:
             wcl.append(where)
@@ -312,6 +353,9 @@ class syslogfilter(object):
         self.vlogsql(statement, sqla)
         c.execute(statement, sqla)
 
+    def warn(self, s):
+        print >> sys.stderr, 'WARNING: %s' % s
+
     def vprint(self, s):
         if self.verbose:
             print >> sys.stderr, 'VERBOSE: %s' % s
@@ -323,10 +367,13 @@ class syslogfilter(object):
             print >> sys.stderr, 'SQL: %s' % statement
             print >> sys.stderr, '=' * 40
 
-    def select(self, cursor, clauses=(), cols=SYSLOG_COLUMNS, outer=''):
+    def select(self, cursor, clauses=(), cols=None, outer=''):
         self.select2(cursor, clauses=clauses, cols=cols, outer=outer)
 
-    def select2(self, cursor, where='', clauses=(), outer='', cols=SYSLOG_COLUMNS, sqla=None):
+    def select2(self, cursor, where='', clauses=(), outer='',
+                cols=None, sqla=None):
+        if cols is None:
+            cols = self.needed_cols
         s = self.mkstmt(cols, where, clauses)
         if outer:
             s = outer % s
@@ -335,6 +382,19 @@ class syslogfilter(object):
     def selectrow(self, cursor, cols):
         self.cexec(cursor, self.mkstmt(cols))
         return cursor.fetchone()
+
+    def gen_needed_cols(self, options):
+        """Determine columns which we actually need"""
+        if options.mode == 'poller':
+            yield 'seq'
+        for x in SYSLOG_BASE_COLS:
+            yield x
+        yield 'program'
+        if options.print_priority or options.print_full:
+            yield 'facility'
+            yield 'priority'
+        if options.print_full:
+            yield 'tag'
 
 class runmodeswitch(object):
 
@@ -354,16 +414,20 @@ class runmodeswitch(object):
     def start_tail(self, options):
         c = self.slf.getcursor()
         try:
-            self.slf.select(c, ['ORDER BY stamp DESC', 'LIMIT %d' % options.tailcount],
+            clauses = ['ORDER BY stamp DESC']
+            if options.tailcount > 0:
+                clauses.append('LIMIT %d' % options.tailcount)
+            self.slf.select(c, clauses,
                         outer='SELECT * FROM (%s) AS x ORDER BY x.stamp')
-            self.slf.logprinter.precs(c.fetchall())
+            recs = c.fetchall()
+            self.slf.logprinter.precs(recs)
+            if options.tailcount_defaulted and len(recs) >= options.tailcount:
+                z, = self.slf.selectrow(c, cols='COUNT(*)')
+                self.slf.warn('tailcount output limited [%d/%d]' % (len(recs), z))
         finally:
             c.close()
 
-    def start_stats_simple(self, options):
-        self.start_stats(options, True)
-
-    def start_stats(self, options, simple=False):
+    def start_view(self, options, simple=False):
         def summary(labelfmt, sqlcols):
             self.slf.select(c, cols=sqlcols)
             print labelfmt % c.fetchone()[0]
@@ -446,14 +510,53 @@ class runmodeswitch(object):
             c.close()
 
 
+def set_local_timezone(options):
+    global LOCAL_TIMEZONE
+    if not options.local_timezone:
+        return
+    try:
+        import pytz
+    except ImportError:
+        app_error('pytz module required for --local-timezone')
+    try:
+        import tzlocal
+    except ImportError:
+        import os
+        tzs = os.getenv('TZ')
+        if not tzs:
+            app_error('unable to determine local timezone')
+        try:
+            LOCAL_TIMEZONE = pytz.timezone(tzs)
+        except KeyError:
+            app_error('invalid local timezone: %s' % tzs)
+    else:
+        LOCAL_TIMEZONE = tzlocal.get_localzone()
+
+def set_print_verbose(options):
+    if options.print_verbose is None:
+        pass
+    elif options.print_verbose >= 2:
+        options.print_full = True
+    elif options.print_verbose >= 1:
+        options.print_priority = True
+
+def set_quiet_mode(options):
+    for x in 'print_stats', 'progress':
+        setattr(options, x, False)
+
 def optparseconfig():
     parser = optparse.OptionParser('usage: %prog [options]',
                                    add_help_option=False,
                                    version=__version__)
-    parser.set_defaults(verbose=False, mode='stats_simple')
+    parser.set_defaults(verbose=False, tailcount=None, progress=True)
+    #parser.set_defaults(mode='stats_simple')
+    parser.set_defaults(mode='tail')
     # Done explicitly to avoid taking up the -h option
     parser.add_option('', '--help', action='help',
                       help='show this help message and exit')
+
+    def quietmode(option, opt_str, value, parser):
+        set_quiet_mode(parser.values)
 
     def storeandmode(realdest, modevalue):
         def optioncb(option, opt_str, value, parser):
@@ -464,11 +567,11 @@ def optparseconfig():
     modegroup = optparse.OptionGroup(parser, 'Running mode options')
     modegroup.add_option('-n', type='int', action='callback',
                          callback=storeandmode('tailcount', 'tail'),
-                         help='Display the last N records in view (tail mode)')
+                         help='Display the last N records in view (tail mode) (default: N=%d); 0=unlimited' % DEFAULT_TAILCOUNT)
     modegroup.add_option('-P', dest='mode', action='store_const', const='poller',
                          help='Enable polling mode')
-    modegroup.add_option('', '--stats', dest='mode', action='store_const', const='stats',
-                         help='Display statistics about the filtered view')
+    modegroup.add_option('', '--view', dest='mode', action='store_const', const='view',
+                         help='Show statistics of the filtered view')
     modegroup.add_option('', '--hosts', dest='mode', action='store_const', const='hosts',
                          help='List distinct hosts in the filtered view')
     modegroup.add_option('-H', '--hstats', dest='mode', action='store_const', const='hstats',
@@ -482,20 +585,36 @@ def optparseconfig():
     dbgroup.add_option('-d', '--dbconnfile', dest='dbconnfile', type='string',
                       help='File containing PostgreSQL connection string; '\
                       'default read from SYSLOG_PGDB environment variable')
-    dbgroup.add_option('-v', '--verbose', dest='verbose', action='store_true')
+    dbgroup.add_option('', '--sql-verbose', dest='verbose', action='store_true',
+        help='Print details about SQL queries')
+    dbgroup.add_option('', '--implied-domain', dest='implied_domains',
+        type='string', action='append', default=[],
+        help='''
+Specify domain names which might be implied in some places. On output,
+these are stripped from the hostname. On input, the first one
+specified will be appended to -h arguments that are not qualified.
+        '''.strip())
     parser.add_option_group(dbgroup)
 
-    timegroup = optparse.OptionGroup(parser, 'Time filtering options')
-    timegroup.add_option('-i', '--interval', dest='interval', type='string', default='8 hours',
-                      help='SQL interval (time delta) expression')
-    timegroup.add_option('-B', '--begin', dest='begindate', type='string')
-    timegroup.add_option('-E', '--end', dest='enddate', type='string')
+    timegroup = optparse.OptionGroup(parser, 'Time filtering options',
+        '''
+Specify time bounds for data to be searched. The default is an
+INTERVAL of the recent past. Explicit date range takes priority (value
+is SQL DATE expression)
+        '''.strip())
+    timegroup.add_option('-i', '--interval', dest='interval',
+                         type='string', default=DEFAULT_INTERVAL,
+                         help='SQL interval (time delta) expression (default: %s)' % DEFAULT_INTERVAL)
+    timegroup.add_option('-B', '--begin', dest='begindate', type='string',
+        help='Search records starting at this time')
+    timegroup.add_option('-E', '--end', dest='enddate', type='string',
+        help='Search records up to this time')
     parser.add_option_group(timegroup)
 
     simplefil = optparse.OptionGroup(parser, 'Simple column filtering options',
                                      'If the first character of the option value is a '
                                      'dash (-) the match sense will be reversed (i.e. NOT)')
-    simplefil.add_option('-h', '--host', dest='filter_host',
+    simplefil.add_option('-h', '--host', dest='filter_host', default=[],
                          type='string', action='append',
                          help='Match syslog source host')
     simplefil.add_option('-f', '--facility', dest='filter_facility',
@@ -516,15 +635,31 @@ def optparseconfig():
     parser.add_option_group(advfilter)
 
     printgroup = optparse.OptionGroup(parser, 'Log message output options')
+    printgroup.add_option('-v', '--print-verbose', dest='print_verbose',
+        action='count',
+        help='Bump output detail level (1=print-priority, 2=print-full)')
+    printgroup.add_option('-q', '--quiet', action='callback',
+                          callback=quietmode,
+                          help='Quiet mode - suppress extraneous output')
+    printgroup.add_option('', '--no-auto-quiet', action='store_true',
+        help='Do not automatically enable quiet mode if non-tty detected')
     printgroup.add_option('', '--no-hostname', action='store_true',
         help='Do not include hostname in record output')
-    printgroup.add_option('', '--print-priority', action='store_true')
-    printgroup.add_option('', '--print-full', action='store_true')
-    printgroup.add_option('', '--print-stats', action='store_true',
-        help='Force output of statistics (default: only if stdout is a tty)')
+    printgroup.add_option('', '--date-format', default=DEFAULT_DATE_FORMAT,
+        help='Date format for record output in strftime(3) syntax')
+    addboolopt(printgroup, 'local-timezone',
+        help='Output timestamps in the local timezone (WARNING: may not always be internally consistent, e.g. during DST)')
+    printgroup.add_option('', '--print-priority', action='store_true',
+        help='Include syslog facility and priority in output')
+    printgroup.add_option('', '--print-full', action='store_true',
+        help='Break out all syslog details in output')
+    addboolopt(printgroup, 'stats', dest='print_stats',
+        help='view statistics collection (output at the end or for SIGINFO)')
     parser.add_option_group(printgroup)
 
     pollergroup = optparse.OptionGroup(parser, 'Polling mode options')
+    addboolopt(pollergroup, 'progress',
+               help='output of wait progress')
     pollergroup.add_option('', '--poll-interval', dest='poller_interval', type='float', default=0.5,
                       help='How often to poll the database in polling mode')
     pollergroup.add_option('', '--poll-elapsenote', dest='poller_elapsenote', type='float', default=60,
@@ -540,6 +675,18 @@ def main():
     options, args = parser.parse_args()
     if options.mode is None:
         parser.error('at least one running mode option is required')
+    options.tailcount_defaulted = options.tailcount is None
+    if options.tailcount_defaulted:
+        options.tailcount = DEFAULT_TAILCOUNT
+    if options.mode == 'poller' and options.print_stats is None:
+        options.print_stats = True
+    if not options.no_auto_quiet and not sys.stdout.isatty():
+        set_quiet_mode(options)
+    set_print_verbose(options)
+    try:
+        set_local_timezone(options)
+    except ApplicationError, e:
+        parser.error('%s' % e)
     try:
         sf = syslogfilter(options)
         try:
@@ -551,21 +698,23 @@ def main():
     except KeyboardInterrupt:
         pass
 
-def conswaiter(waitstr='\-/|', refresh=.1):
+def conswaiter(waitstr='\-/|', refresh=.1, noprint=False):
     ix = [0]
     def iwait(howlong, notice=''):
         t = time.time()
         while True:
             s = '%s [%s]' % (notice, waitstr[ix[0]])
-            print '\r%s' % s,
-            sys.stdout.flush()
+            if not noprint:
+                print '\r%s' % s,
+                sys.stdout.flush()
             ix[0] = (ix[0] + 1) % len(waitstr)
             if time.time() - t >= howlong:
                 return len(s)
             try:
                 time.sleep(refresh)
             except KeyboardInterrupt:
-                print
+                if not noprint:
+                    print
                 raise
     return iwait
 
@@ -590,6 +739,8 @@ def linesep(where=sys.stdout, n=50):
     print >> where, '-' * n
 
 def stampformat(datestamp, format='%b %d %H:%M:%S'):
+    if LOCAL_TIMEZONE is not None:
+        datestamp = LOCAL_TIMEZONE.fromutc(datestamp)
     return datestamp.strftime(format)
 
 def deltaformat(td):
@@ -604,6 +755,50 @@ def deltaformat(td):
         s.append('%d minutes' % mins)
     s.append('%d seconds' % secs)
     return ', '.join(s)
+
+def addboolopt(parser, key, short=None, **kwargs):
+    if 'dest' not in kwargs:
+        kwargs = dict(kwargs, dest=key.replace('-', '_'))
+    if 'help' in kwargs:
+        enword, disword = kwargs.pop('endis', ('Enable', 'Disable'))
+        enkw = dict(kwargs, help='%s %s' % (enword, kwargs['help']))
+        diskw = dict(kwargs, help='%s %s' % (disword, kwargs['help']))
+    else:
+        enkw = diskw = kwargs
+    if 'en_action' in enkw:
+        enkw = dict(enkw, action=enkw['en_action'])
+        del enkw['en_action']
+        diskw = dict(diskw)
+        del diskw['en_action']
+    else:
+        enkw = dict(enkw, action='store_true')
+    disargs = ('--no-%s' % key,)
+    if 'disopt' in enkw:
+        disargs = (enkw['disopt'],) + disargs
+        del enkw['disopt']
+        del diskw['disopt']
+    enkey = '--%s' % key
+    enargs = (enkey,) if short is None else (short, enkey)
+    parser.add_option(*enargs, **enkw)
+    parser.add_option(*disargs, action='store_false', **diskw)
+
+def quote_implied_domains(options, s):
+    if options.implied_domains and '.' not in s:
+        s = '%s.%s' % (s, options.implied_domains[0])
+    return s
+
+def unquote_implied_domains(options, s):
+    for xd in options.implied_domains:
+        p = '.%s' % xd
+        if len(s) > len(p) and s.endswith(p):
+            s = s[:-len(p)]
+            break
+    return s
+
+def colslist(x):
+    if isinstance(x, str):
+        return x
+    return ', '.join(x)
 
 if __name__ == '__main__':
     main()
